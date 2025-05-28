@@ -1,0 +1,430 @@
+name: 🚀 Performance Testing
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run performance tests daily at 2 AM UTC
+    - cron: "0 2 * * *"
+
+env:
+  API_URL: http://localhost:7000
+  ADMIN_TOKEN: BdD--lvAf5SXLKFa98ji7GO6zhCv9iaNao4XWyAVrnA
+
+jobs:
+  # 🏗️ Setup Test Environment
+  setup:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: password123
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+
+      - name: 📋 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install locust pytest-benchmark
+
+      - name: 🚀 Start API Server
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 7000 &
+          sleep 15
+        env:
+          MONGODB_URI: mongodb://admin:password123@localhost:27017/test_db?authSource=admin
+          DB_NAME: test_db
+
+      - name: 🔍 Verify API Health
+        run: |
+          curl -f http://localhost:7000/health || exit 1
+
+      - name: 📊 Basic Performance Test
+        run: |
+          python -c "
+          import requests
+          import time
+
+          # Test basic API response times
+          start = time.time()
+          response = requests.get('http://localhost:7000/health')
+          health_time = time.time() - start
+
+          print(f'🏥 Health endpoint: {health_time:.3f}s')
+          assert response.status_code == 200
+          assert health_time < 1.0, f'Health check too slow: {health_time:.3f}s'
+          "
+
+      - name: 🧪 Upload Performance Test Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: basic-performance-results
+          path: |
+            *.log
+            *.json
+
+  # 🚀 Load Testing with Locust
+  load-test:
+    runs-on: ubuntu-latest
+    needs: setup
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: password123
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install locust
+
+      - name: 🚀 Start API Server
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 7000 &
+          sleep 15
+        env:
+          MONGODB_URI: mongodb://admin:password123@localhost:27017/test_db?authSource=admin
+          DB_NAME: test_db
+
+      - name: 📝 Create Locust Test File
+        run: |
+          cat > locustfile.py << 'EOF'
+          from locust import HttpUser, task, between
+          import io
+          from PIL import Image
+          import random
+
+          class ImageModerationUser(HttpUser):
+              wait_time = between(1, 3)
+              
+              def on_start(self):
+                  """Setup for each user"""
+                  self.token = "BdD--lvAf5SXLKFa98ji7GO6zhCv9iaNao4XWyAVrnA"
+                  self.headers = {"Authorization": f"Bearer {self.token}"}
+              
+              @task(3)
+              def test_health(self):
+                  """Test health endpoint - most frequent"""
+                  with self.client.get("/health", catch_response=True) as response:
+                      if response.status_code == 200:
+                          response.success()
+                      else:
+                          response.failure(f"Health check failed: {response.status_code}")
+              
+              @task(2)
+              def test_auth_tokens(self):
+                  """Test auth tokens endpoint"""
+                  with self.client.get("/auth/tokens", headers=self.headers, catch_response=True) as response:
+                      if response.status_code == 200:
+                          response.success()
+                      else:
+                          response.failure(f"Auth failed: {response.status_code}")
+              
+              @task(1)
+              def test_image_moderation(self):
+                  """Test image moderation - most expensive operation"""
+                  # Create a simple test image
+                  img = Image.new('RGB', (400, 300), (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
+                  img_buffer = io.BytesIO()
+                  img.save(img_buffer, format='JPEG')
+                  img_buffer.seek(0)
+                  
+                  files = {"file": ("test.jpg", img_buffer, "image/jpeg")}
+                  
+                  with self.client.post("/moderate", files=files, headers=self.headers, catch_response=True) as response:
+                      if response.status_code == 200:
+                          result = response.json()
+                          if "categories" in result and len(result["categories"]) == 2:
+                              response.success()
+                          else:
+                              response.failure(f"Invalid response format")
+                      else:
+                          response.failure(f"Moderation failed: {response.status_code}")
+          EOF
+
+      - name: 🚀 Run Load Test
+        run: |
+          locust -f locustfile.py --headless \
+            --users 10 \
+            --spawn-rate 2 \
+            --run-time 2m \
+            --host http://localhost:7000 \
+            --html performance-report.html \
+            --csv performance
+
+      - name: 📊 Analyze Performance Results
+        run: |
+          echo "📈 Performance Test Results:"
+          echo "================================"
+
+          if [ -f "performance_stats.csv" ]; then
+            echo "📋 Request Statistics:"
+            cat performance_stats.csv
+            
+            echo ""
+            echo "📊 Performance Analysis:"
+            python -c "
+            import csv
+            
+            with open('performance_stats.csv', 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row['Name'] == '/moderate':
+                        avg_time = float(row['Average Response Time'])
+                        max_time = float(row['Max Response Time'])
+                        requests = int(row['Request Count'])
+                        failures = int(row['Failure Count'])
+                        
+                        print(f'🎯 Image Moderation Endpoint:')
+                        print(f'  📊 Average Response Time: {avg_time:.0f}ms')
+                        print(f'  📊 Max Response Time: {max_time:.0f}ms')
+                        print(f'  📊 Total Requests: {requests}')
+                        print(f'  📊 Failures: {failures}')
+                        print(f'  📊 Success Rate: {((requests-failures)/requests*100):.1f}%')
+                        
+                        # Performance assertions
+                        if avg_time > 5000:  # 5 seconds
+                            print(f'❌ PERFORMANCE ISSUE: Average response time too high!')
+                            exit(1)
+                        if failures/requests > 0.05:  # 5% failure rate
+                            print(f'❌ RELIABILITY ISSUE: Too many failures!')
+                            exit(1)
+                        
+                        print(f'✅ Performance test PASSED!')
+            "
+          fi
+
+      - name: 📤 Upload Performance Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: load-test-results
+          path: |
+            performance-report.html
+            performance_*.csv
+
+  # 🎯 AI Model Performance Testing
+  ai-performance-test:
+    runs-on: ubuntu-latest
+    needs: setup
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: password123
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🚀 Start API Server
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 7000 &
+          sleep 15
+        env:
+          MONGODB_URI: mongodb://admin:password123@localhost:27017/test_db?authSource=admin
+          DB_NAME: test_db
+
+      - name: 🧪 AI Model Performance Test
+        run: |
+          python -c "
+          import requests
+          import time
+          import io
+          from PIL import Image, ImageDraw
+          import statistics
+
+          API_URL = 'http://localhost:7000'
+          ADMIN_TOKEN = 'BdD--lvAf5SXLKFa98ji7GO6zhCv9iaNao4XWyAVrnA'
+          headers = {'Authorization': f'Bearer {ADMIN_TOKEN}'}
+
+          def create_test_image(image_type='normal'):
+              if image_type == 'nudity':
+                  # Skin-tone image
+                  img = Image.new('RGB', (400, 600), (220, 180, 140))
+                  draw = ImageDraw.Draw(img)
+                  draw.ellipse([150, 200, 250, 300], fill=(210, 170, 130))
+              elif image_type == 'drugs':
+                  # White/circular patterns
+                  img = Image.new('RGB', (400, 300), (255, 255, 255))
+                  draw = ImageDraw.Draw(img)
+                  for i in range(5):
+                      x, y = 50 + i*70, 150
+                      draw.ellipse([x-15, y-15, x+15, y+15], fill=(240, 240, 240))
+              else:
+                  # Normal colored image
+                  img = Image.new('RGB', (400, 300), (100, 150, 200))
+              
+              buffer = io.BytesIO()
+              img.save(buffer, format='JPEG')
+              buffer.seek(0)
+              return buffer
+
+          def test_moderation_performance(image_type, num_tests=5):
+              times = []
+              print(f'🧪 Testing {image_type} detection performance...')
+              
+              for i in range(num_tests):
+                  img_buffer = create_test_image(image_type)
+                  files = {'file': ('test.jpg', img_buffer, 'image/jpeg')}
+                  
+                  start_time = time.time()
+                  response = requests.post(f'{API_URL}/moderate', files=files, headers=headers)
+                  end_time = time.time()
+                  
+                  response_time = (end_time - start_time) * 1000  # Convert to ms
+                  times.append(response_time)
+                  
+                  if response.status_code == 200:
+                      result = response.json()
+                      confidence = result.get('overall_confidence', 0)
+                      print(f'  Test {i+1}: {response_time:.0f}ms, Confidence: {confidence:.1%}')
+                  else:
+                      print(f'  Test {i+1}: FAILED ({response.status_code})')
+              
+              avg_time = statistics.mean(times)
+              max_time = max(times)
+              min_time = min(times)
+              
+              print(f'📊 {image_type.upper()} Performance Summary:')
+              print(f'  Average: {avg_time:.0f}ms')
+              print(f'  Min: {min_time:.0f}ms')
+              print(f'  Max: {max_time:.0f}ms')
+              print()
+              
+              return avg_time, max_time
+
+          # Test different image types
+          normal_avg, normal_max = test_moderation_performance('normal')
+          nudity_avg, nudity_max = test_moderation_performance('nudity')
+          drugs_avg, drugs_max = test_moderation_performance('drugs')
+
+          # Performance assertions
+          print('🎯 Performance Validation:')
+
+          # All tests should complete within 10 seconds
+          if max(normal_max, nudity_max, drugs_max) > 10000:
+              print('❌ PERFORMANCE ISSUE: Some requests took longer than 10 seconds!')
+              exit(1)
+
+          # Average should be under 5 seconds
+          overall_avg = statistics.mean([normal_avg, nudity_avg, drugs_avg])
+          if overall_avg > 5000:
+              print('❌ PERFORMANCE ISSUE: Average response time exceeds 5 seconds!')
+              exit(1)
+
+          print(f'✅ All performance tests PASSED!')
+          print(f'📊 Overall average response time: {overall_avg:.0f}ms')
+          "
+
+      - name: 📝 Performance Summary
+        run: |
+          echo "🎉 AI Performance Testing Completed!"
+          echo "✅ Nudity detection performance verified"
+          echo "✅ Drugs detection performance verified"
+          echo "✅ Overall system performance acceptable"
+
+  # 📊 Performance Summary
+  performance-summary:
+    runs-on: ubuntu-latest
+    needs: [load-test, ai-performance-test]
+    if: always()
+
+    steps:
+      - name: 📥 Download All Results
+        uses: actions/download-artifact@v3
+
+      - name: 📊 Generate Performance Summary
+        run: |
+          echo "# 🚀 Performance Test Summary" > performance-summary.md
+          echo "" >> performance-summary.md
+          echo "## 📅 Test Date: $(date)" >> performance-summary.md
+          echo "" >> performance-summary.md
+          echo "## 🎯 Test Results:" >> performance-summary.md
+          echo "" >> performance-summary.md
+
+          if [ "${{ needs.load-test.result }}" = "success" ]; then
+            echo "✅ **Load Testing**: PASSED" >> performance-summary.md
+          else
+            echo "❌ **Load Testing**: FAILED" >> performance-summary.md
+          fi
+
+          if [ "${{ needs.ai-performance-test.result }}" = "success" ]; then
+            echo "✅ **AI Performance Testing**: PASSED" >> performance-summary.md
+          else
+            echo "❌ **AI Performance Testing**: FAILED" >> performance-summary.md
+          fi
+
+          echo "" >> performance-summary.md
+          echo "## 📊 Key Metrics:" >> performance-summary.md
+          echo "- 🎯 **Target Response Time**: < 5000ms average" >> performance-summary.md
+          echo "- 🎯 **Target Failure Rate**: < 5%" >> performance-summary.md
+          echo "- 🎯 **Concurrent Users Tested**: 10" >> performance-summary.md
+          echo "- 🎯 **Test Duration**: 2 minutes" >> performance-summary.md
+
+          cat performance-summary.md
+
+      - name: 📤 Upload Final Summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-summary
+          path: performance-summary.md

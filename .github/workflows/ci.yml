@@ -1,0 +1,207 @@
+name: 🚀 Continuous Integration
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "18"
+
+jobs:
+  # 🐍 Python Backend Testing
+  backend-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: password123
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: 📦 Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopencv-dev
+
+      - name: 📋 Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov flake8 black
+
+      - name: 🎨 Code Formatting Check (Black)
+        run: |
+          black --check --diff app/ tests/
+
+      - name: 🔍 Linting (Flake8)
+        run: |
+          flake8 app/ tests/ --max-line-length=100 --ignore=E203,W503
+
+      - name: 🧪 Run Backend Tests
+        env:
+          MONGODB_URI: mongodb://admin:password123@localhost:27017/test_db?authSource=admin
+          DB_NAME: test_db
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml --cov-report=html
+
+      - name: 📊 Upload Coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  # ⚛️ React Frontend Testing
+  frontend-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 📦 Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: 🔍 ESLint Check
+        working-directory: ./frontend
+        run: npm run lint --if-present
+
+      - name: 🏗️ Build Frontend
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: 🧪 Run Frontend Tests
+        working-directory: ./frontend
+        run: npm test -- --coverage --watchAll=false
+
+  # 🛡️ Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔒 Run Python Security Check (Bandit)
+        run: |
+          pip install bandit
+          bandit -r app/ -f json -o bandit-report.json || true
+
+      - name: 🔍 Run Safety Check for Dependencies
+        run: |
+          pip install safety
+          safety check --json --output safety-report.json || true
+
+      - name: 📋 Upload Security Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+
+  # 🐳 Docker Build Test
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🏗️ Build API Docker Image
+        run: |
+          docker build -t test-api:latest .
+
+      - name: 🏗️ Build Frontend Docker Image
+        working-directory: ./frontend
+        run: |
+          docker build -t test-frontend:latest .
+
+      - name: 🧪 Test Docker Compose Build
+        run: |
+          docker-compose build
+
+  # 📊 Code Quality Analysis
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 📦 Install Analysis Tools
+        run: |
+          pip install radon complexity mccabe
+
+      - name: 📈 Code Complexity Analysis
+        run: |
+          radon cc app/ -a -nb
+          radon mi app/ -nb
+
+      - name: 📏 Lines of Code Analysis
+        run: |
+          find app/ -name "*.py" | xargs wc -l | tail -1
+
+  # ✅ Integration Test Summary
+  ci-success:
+    runs-on: ubuntu-latest
+    needs:
+      [backend-tests, frontend-tests, security-scan, docker-build, code-quality]
+    if: always()
+
+    steps:
+      - name: ✅ CI Success
+        if: ${{ needs.backend-tests.result == 'success' && needs.frontend-tests.result == 'success' && needs.docker-build.result == 'success' }}
+        run: |
+          echo "🎉 All CI checks passed successfully!"
+          echo "✅ Backend tests: PASSED"
+          echo "✅ Frontend tests: PASSED" 
+          echo "✅ Security scan: COMPLETED"
+          echo "✅ Docker build: PASSED"
+          echo "✅ Code quality: ANALYZED"
+
+      - name: ❌ CI Failure
+        if: ${{ needs.backend-tests.result == 'failure' || needs.frontend-tests.result == 'failure' || needs.docker-build.result == 'failure' }}
+        run: |
+          echo "❌ CI checks failed!"
+          echo "Backend: ${{ needs.backend-tests.result }}"
+          echo "Frontend: ${{ needs.frontend-tests.result }}"
+          echo "Docker: ${{ needs.docker-build.result }}"
+          exit 1

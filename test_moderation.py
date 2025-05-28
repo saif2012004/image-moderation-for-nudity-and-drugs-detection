@@ -14,13 +14,14 @@ def create_test_image():
     return img_bytes
 
 def test_moderation_categories():
-    """Test that the moderation API returns only the 4 expected categories"""
+    """Test that all expected categories are present"""
+    print("\n🧪 Testing moderation categories...")
+    
+    # UPDATED: Only nudity and drugs categories
+    expected_categories = {"nudity", "drugs"}
     
     # Admin token (replace with actual token)
     admin_token = "BdD--lvAf5SXLKFa98ji7GO6zhCv9iaNao4XWyAVrnA"
-    
-    # Expected categories
-    expected_categories = {"nudity", "drugs", "weapons", "hate_symbols"}
     
     print("Testing moderation API with updated categories...")
     

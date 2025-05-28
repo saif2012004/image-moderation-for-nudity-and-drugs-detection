@@ -14,9 +14,7 @@ class ModerationService:
         # Define moderation categories
         self.categories = [
             "nudity",
-            "drugs",
-            "weapons",
-            "hate_symbols"
+            "drugs"
         ]
     
     async def moderate_image(self, image_data: bytes, filename: str) -> ModerationResult:
